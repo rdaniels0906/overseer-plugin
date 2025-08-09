@@ -7,7 +7,7 @@ Simple template and guide for building **ARK: Survival Ascended** server plugins
   - Visual Studio must be configured to use vcpkg (launch the Visual Studio Developer Command Prompt under Tools -> Command Line, and enter `vcpkg integrate install`)
 - An **ARK: Survival Ascended** dedicated server with AsaApi and the latest [x64 MSVC Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) installed
 
-**Note:** This plugin template is up-to-date with AsaApi v1.18. If you require a newer version of the AsaApi headers, you should pull the latest code from [AsaApi](https://github.com/ArkServerApi/AsaApi) into the `extern\AsaApi\` submodule.
+**Note:** This plugin template is up-to-date with AsaApi v1.19. If you require a newer version of the AsaApi headers, you should pull the latest code from [AsaApi](https://github.com/ArkServerApi/AsaApi) into the `extern\AsaApi\` submodule.
 ## 1: Obtain AsaApi.lib
 To use AsaApi, plugins must link against the AsaApi library.
 ### Option 1: Build AsaApi Yourself
