@@ -7,8 +7,12 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\Main.cpp" />
-  </ItemGroup>
+<ClCompile Include="src\Main.cpp" />
+    <ClCompile Include="src\GiveItemToEOSId.cpp" />
+    <ClCompile Include="src\RunConsoleCommand.cpp" />
+    <ClCompile Include="src\CompanionClient.cpp" />
+      <ClCompile Include="src\LocalRconClient.cpp" />
+</ItemGroup>
   <ItemGroup>
     <None Include="vcpkg.json" />
   </ItemGroup>
@@ -803,6 +807,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TargetName>Overseer</TargetName>
     <OutDir>$(SolutionDir)out\</OutDir>
     <IntDir>$(OutDir)$(Platform)\</IntDir>
   </PropertyGroup>
@@ -830,7 +835,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>$(SolutionDir)extern\AsaApi\out_lib\AsaApi.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)extern\AsaApi\out_lib\AsaApi.lib;Crypt32.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if exist "$(TargetDir)$(TargetFileName).arkapi" del /q "$(TargetDir)$(TargetFileName).arkapi"</Command>
@@ -842,4 +847,10 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="src\LocalRconClient.h" />
+  </ItemGroup>
 </Project>
+
+
+
