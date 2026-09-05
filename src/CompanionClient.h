@@ -12,15 +12,27 @@ namespace Companion
     void ProcessPendingRequests();
 
 
-    /*
-     * Publishes a player-originated ASA chat message to Overseer.
-     *
-     * This is called from the ASA chat hook on the game thread.
-     */
     void PublishChatMessage(
         AShooterPlayerController* player,
         const FString* message,
         EChatSendMode::Type send_mode,
         int sender_platform
+    );
+
+
+    void PublishPlayerJoined(
+        APlayerController* player
+    );
+
+
+    void PublishPlayerLeft(
+        AController* player
+    );
+
+
+    void PublishPlayerDeath(
+        AShooterPlayerState* killer_player_state,
+        UDamageType* killer_damage_type,
+        AShooterPlayerState* killed_player_state
     );
 }

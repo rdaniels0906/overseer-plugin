@@ -1,4 +1,21 @@
 {
   "enabled": true,
-  "url": "wss://app.pixelsenpai.com/companion"
+  "url": "wss://app.pixelsenpai.com/companion",
+  "telemetry": {
+    "heartbeat": {
+      "enabled": true,
+      "intervalSeconds": 60
+    },
+    "playerLifecycleEvents": {
+      "enabled": true
+    },
+    "combatEvents": {
+      "enabled": true
+    },
+    "chatEvents": {
+      "enabled": true
+    },
+    "maxTelemetryQueueSize": 1000,
+    "dropOldTelemetryWhenFull": true
+  }
 }

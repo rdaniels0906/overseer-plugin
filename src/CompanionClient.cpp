@@ -16,7 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <Logger/spdlog/sinks/stdout_sinks.h>
 #include <iostream>
 #include <atomic>
@@ -42,7 +43,7 @@ namespace
 
     constexpr const char*
         PLUGIN_VERSION =
-            "0.3.0";
+            "0.4.0";
 
 
     struct CompanionConfig
@@ -61,6 +62,28 @@ namespace
 
         bool paired =
             false;
+
+
+        bool heartbeat_enabled =
+            true;
+
+        int heartbeat_interval_seconds =
+            60;
+
+        bool player_lifecycle_events_enabled =
+            true;
+
+        bool combat_events_enabled =
+            true;
+
+        bool chat_events_enabled =
+            true;
+
+        int max_telemetry_queue_size =
+            1000;
+
+        bool drop_old_telemetry_when_full =
+            true;
     };
 
 
@@ -126,8 +149,30 @@ namespace
         last_heartbeat_sent{};
 
 
-    std::chrono::steady_clock::time_point
-        last_player_snapshot_sent{};
+    std::mutex
+        outbound_mutex;
+
+
+    std::condition_variable
+        outbound_condition;
+
+
+    std::deque<json>
+        outbound_messages;
+
+
+    std::thread
+        outbound_thread;
+
+
+    std::atomic<bool>
+        outbound_running =
+            false;
+
+
+    std::atomic<std::uint64_t>
+        dropped_telemetry =
+            0;
 
 
 
@@ -1363,6 +1408,59 @@ namespace
             {
                 "updateChannel",
                 value.update_channel
+            },
+            {
+                "telemetry",
+                {
+                    {
+                        "heartbeat",
+                        {
+                            {
+                                "enabled",
+                                value.heartbeat_enabled
+                            },
+                            {
+                                "intervalSeconds",
+                                value.heartbeat_interval_seconds
+                            }
+                        }
+                    },
+                    {
+                        "playerLifecycleEvents",
+                        {
+                            {
+                                "enabled",
+                                value.player_lifecycle_events_enabled
+                            }
+                        }
+                    },
+                    {
+                        "combatEvents",
+                        {
+                            {
+                                "enabled",
+                                value.combat_events_enabled
+                            }
+                        }
+                    },
+                    {
+                        "chatEvents",
+                        {
+                            {
+                                "enabled",
+                                value.chat_events_enabled
+                            }
+                        }
+                    },
+                    {
+                        "maxTelemetryQueueSize",
+                        value.max_telemetry_queue_size
+                    },
+                    {
+                        "dropOldTelemetryWhenFull",
+                        value.drop_old_telemetry_when_full
+                    }
+                }
             }
         };
 
@@ -1472,6 +1570,129 @@ namespace
                 "updateChannel",
                 "Production"
             );
+
+
+        if (
+            data.contains(
+                "telemetry"
+            ) &&
+            data[
+                "telemetry"
+            ].is_object()
+        )
+        {
+            const auto& telemetry =
+                data[
+                    "telemetry"
+                ];
+
+
+            if (
+                telemetry.contains(
+                    "heartbeat"
+                ) &&
+                telemetry[
+                    "heartbeat"
+                ].is_object()
+            )
+            {
+                const auto& heartbeat =
+                    telemetry[
+                        "heartbeat"
+                    ];
+
+
+                result.heartbeat_enabled =
+                    heartbeat.value(
+                        "enabled",
+                        true
+                    );
+
+
+                result.heartbeat_interval_seconds =
+                    (std::max)(
+                        5,
+                        heartbeat.value(
+                            "intervalSeconds",
+                            60
+                        )
+                    );
+            }
+
+
+            if (
+                telemetry.contains(
+                    "playerLifecycleEvents"
+                ) &&
+                telemetry[
+                    "playerLifecycleEvents"
+                ].is_object()
+            )
+            {
+                result.player_lifecycle_events_enabled =
+                    telemetry[
+                        "playerLifecycleEvents"
+                    ].value(
+                        "enabled",
+                        true
+                    );
+            }
+
+
+            if (
+                telemetry.contains(
+                    "combatEvents"
+                ) &&
+                telemetry[
+                    "combatEvents"
+                ].is_object()
+            )
+            {
+                result.combat_events_enabled =
+                    telemetry[
+                        "combatEvents"
+                    ].value(
+                        "enabled",
+                        true
+                    );
+            }
+
+
+            if (
+                telemetry.contains(
+                    "chatEvents"
+                ) &&
+                telemetry[
+                    "chatEvents"
+                ].is_object()
+            )
+            {
+                result.chat_events_enabled =
+                    telemetry[
+                        "chatEvents"
+                    ].value(
+                        "enabled",
+                        true
+                    );
+            }
+
+
+            result.max_telemetry_queue_size =
+                (std::max)(
+                    100,
+                    telemetry.value(
+                        "maxTelemetryQueueSize",
+                        1000
+                    )
+                );
+
+
+            result.drop_old_telemetry_when_full =
+                telemetry.value(
+                    "dropOldTelemetryWhenFull",
+                    true
+                );
+        }
 
 
         if (
@@ -1625,6 +1846,9 @@ namespace
             ) ||
             !data.contains(
                 "discoveryKey"
+            ) ||
+            !data.contains(
+                "telemetry"
             )
         )
         {
@@ -1999,18 +2223,367 @@ namespace
         const json& message
     )
     {
+        {
+            std::lock_guard lock(
+                outbound_mutex
+            );
+
+
+            const std::size_t max_size =
+                static_cast<std::size_t>(
+                    (std::max)(
+                        100,
+                        config.max_telemetry_queue_size
+                    )
+                );
+
+
+            if (
+                outbound_messages.size() >=
+                    max_size
+            )
+            {
+                if (
+                    config.drop_old_telemetry_when_full
+                )
+                {
+                    outbound_messages.pop_front();
+
+                    dropped_telemetry.fetch_add(
+                        1
+                    );
+                }
+                else
+                {
+                    dropped_telemetry.fetch_add(
+                        1
+                    );
+
+                    return;
+                }
+            }
+
+
+            outbound_messages.push_back(
+                message
+            );
+        }
+
+
+        outbound_condition.notify_one();
+    }
+
+
+    void
+    StartOutboundWorker()
+    {
         if (
-            websocket.getReadyState() !=
-            ix::ReadyState::Open
+            outbound_running.exchange(
+                true
+            )
         )
         {
             return;
         }
 
 
-        websocket.sendText(
-            message.dump()
+        outbound_thread =
+            std::thread(
+                []()
+                {
+                    while (
+                        outbound_running.load()
+                    )
+                    {
+                        json message;
+
+
+                        {
+                            std::unique_lock lock(
+                                outbound_mutex
+                            );
+
+
+                            outbound_condition.wait_for(
+                                lock,
+                                std::chrono::milliseconds(
+                                    250
+                                ),
+                                []()
+                                {
+                                    return
+                                        !outbound_running.load() ||
+                                        !outbound_messages.empty();
+                                }
+                            );
+
+
+                            if (
+                                !outbound_running.load()
+                            )
+                            {
+                                break;
+                            }
+
+
+                            if (
+                                outbound_messages.empty()
+                            )
+                            {
+                                continue;
+                            }
+
+
+                            /*
+                             * Keep queued messages while disconnected.
+                             * ixwebsocket's reconnect logic can restore the
+                             * connection without losing pending telemetry.
+                             */
+                            if (
+                                websocket.getReadyState() !=
+                                    ix::ReadyState::Open
+                            )
+                            {
+                                lock.unlock();
+
+
+                                std::this_thread::sleep_for(
+                                    std::chrono::milliseconds(
+                                        250
+                                    )
+                                );
+
+
+                                continue;
+                            }
+
+
+                            message =
+                                std::move(
+                                    outbound_messages.front()
+                                );
+
+
+                            outbound_messages.pop_front();
+                        }
+
+
+                        try
+                        {
+                            /*
+                             * JSON serialization and WebSocket I/O happen
+                             * only on this worker thread.
+                             */
+                            websocket.sendText(
+                                message.dump()
+                            );
+                        }
+                        catch (
+                            const std::exception& error
+                        )
+                        {
+                            Log::GetLog()->warn(
+                                "Outbound companion send failed: {}",
+                                error.what()
+                            );
+                        }
+                    }
+                }
+            );
+    }
+
+
+    void
+    StopOutboundWorker()
+    {
+        if (
+            !outbound_running.exchange(
+                false
+            )
+        )
+        {
+            return;
+        }
+
+
+        outbound_condition.notify_all();
+
+
+        if (
+            outbound_thread.joinable()
+        )
+        {
+            outbound_thread.join();
+        }
+
+
+        std::lock_guard lock(
+            outbound_mutex
         );
+
+
+        outbound_messages.clear();
+    }
+
+
+    json
+    BuildPlayerTelemetry(
+        AShooterPlayerController* shooter
+    )
+    {
+        json player =
+        {
+            {
+                "eosId",
+                ""
+            },
+            {
+                "survivorName",
+                ""
+            },
+            {
+                "tribeId",
+                nullptr
+            },
+            {
+                "tribeName",
+                nullptr
+            },
+            {
+                "isTribeAdmin",
+                false
+            },
+            {
+                "level",
+                nullptr
+            },
+            {
+                "xpPercent",
+                nullptr
+            },
+            {
+                "ping",
+                nullptr
+            }
+        };
+
+
+        if (!shooter)
+        {
+            return player;
+        }
+
+
+        const FString eos =
+            AsaApi::IApiUtils::
+                GetEOSIDFromController(
+                    shooter
+                );
+
+
+        player[
+            "eosId"
+        ] =
+            eos.ToString();
+
+
+        FString survivor_name;
+
+
+        shooter
+            ->GetPlayerCharacterName(
+                &survivor_name
+            );
+
+
+        player[
+            "survivorName"
+        ] =
+            survivor_name.ToStringUTF8();
+
+
+        auto* player_state =
+            static_cast<
+                AShooterPlayerState*
+            >(
+                shooter
+                    ->PlayerStateField()
+                    .Get()
+            );
+
+
+        if (player_state)
+        {
+            player[
+                "level"
+            ] =
+                player_state
+                    ->GetCharacterLevel();
+
+
+            player[
+                "ping"
+            ] =
+                player_state
+                    ->ExactPingV2Field();
+
+
+            if (
+                player_state->IsInTribe()
+            )
+            {
+                auto& tribe =
+                    player_state
+                        ->MyTribeDataField();
+
+
+                player[
+                    "tribeId"
+                ] =
+                    tribe.TribeIDField();
+
+
+                player[
+                    "tribeName"
+                ] =
+                    tribe
+                        .TribeNameField()
+                        .ToStringUTF8();
+
+
+                player[
+                    "isTribeAdmin"
+                ] =
+                    player_state
+                        ->IsTribeAdmin();
+            }
+        }
+
+
+        auto* character =
+            shooter
+                ->GetPlayerCharacter();
+
+
+        if (character)
+        {
+            auto* status =
+                character
+                    ->MyCharacterStatusComponentField();
+
+
+            if (status)
+            {
+                player[
+                    "xpPercent"
+                ] =
+                    status
+                        ->GetExperiencePercent();
+            }
+        }
+
+
+        return player;
     }
 
 
@@ -2059,103 +2632,20 @@ namespace
                 );
 
 
-            if (!shooter)
-            {
-                continue;
-            }
-
-
-            const FString eos =
-                AsaApi::IApiUtils::
-                    GetEOSIDFromController(
-                        shooter
-                    );
-
-
-            const std::string eos_id =
-                eos.ToString();
-
-
-            if (eos_id.empty())
-            {
-                continue;
-            }
-
-
-            FString survivor_name;
-
-            shooter
-                ->GetPlayerCharacterName(
-                    &survivor_name
+            json player =
+                BuildPlayerTelemetry(
+                    shooter
                 );
 
 
-            json player =
-            {
-                {
-                    "eosId",
-                    eos_id
-                },
-                {
-                    "survivorName",
-                    survivor_name.ToString()
-                },
-                {
-                    "tribeId",
-                    nullptr
-                },
-                {
-                    "tribeName",
-                    nullptr
-                },
-                {
-                    "isTribeAdmin",
-                    false
-                }
-            };
-
-
             if (
-                shooter->IsInTribe()
+                player.value(
+                    "eosId",
+                    ""
+                ).empty()
             )
             {
-                auto* player_state =
-                    static_cast<
-                        AShooterPlayerState*
-                    >(
-                        shooter
-                            ->PlayerStateField()
-                            .Get()
-                    );
-
-
-                if (player_state)
-                {
-                    auto& tribe =
-                        player_state
-                            ->MyTribeDataField();
-
-
-                    player[
-                        "tribeId"
-                    ] =
-                        tribe.TribeIDField();
-
-
-                    player[
-                        "tribeName"
-                    ] =
-                        tribe
-                            .TribeNameField()
-                            .ToString();
-
-
-                    player[
-                        "isTribeAdmin"
-                    ] =
-                        shooter
-                            ->IsTribeAdmin();
-                }
+                continue;
             }
 
 
@@ -2582,9 +3072,8 @@ namespace
     SendPresenceIfDue()
     {
         if (
-            !authenticated.load() ||
-            websocket.getReadyState() !=
-                ix::ReadyState::Open
+            !config.heartbeat_enabled ||
+            !authenticated.load()
         )
         {
             return;
@@ -2601,77 +3090,63 @@ namespace
                 .count() == 0 ||
             now - last_heartbeat_sent >=
                 std::chrono::seconds(
-                    20
+                    config.heartbeat_interval_seconds
                 );
 
 
-        const bool snapshot_due =
-            last_player_snapshot_sent
-                .time_since_epoch()
-                .count() == 0 ||
-            now - last_player_snapshot_sent >=
-                std::chrono::seconds(
-                    30
-                );
-
-
-        if (
-            !heartbeat_due &&
-            !snapshot_due
-        )
+        if (!heartbeat_due)
         {
             return;
         }
 
 
         /*
-         * All ASA player/controller access happens here,
-         * from ProcessPendingRequests() on ARK's game thread.
+         * All ASA player/controller access stays on the game thread.
+         * Only copied primitive/json data is queued to the worker.
          */
         const json players =
             CollectOnlinePlayerTelemetry();
 
 
-        if (heartbeat_due)
-        {
-            SendJson({
+        SendJson({
+            {
+                "type",
+                "heartbeat"
+            },
+            {
+                "schemaVersion",
+                2
+            },
+            {
+                "playerCount",
+                players.size()
+            },
+            {
+                "players",
+                players
+            },
+            {
+                "server",
                 {
-                    "type",
-                    "heartbeat"
-                },
-                {
-                    "playerCount",
-                    players.size()
+                    {
+                        "serverId",
+                        metadata.server_id
+                    },
+                    {
+                        "clusterId",
+                        metadata.cluster_id
+                    },
+                    {
+                        "sessionName",
+                        metadata.session_name
+                    }
                 }
-            });
+            }
+        });
 
 
-            last_heartbeat_sent =
-                now;
-        }
-
-
-        if (snapshot_due)
-        {
-            SendJson({
-                {
-                    "type",
-                    "player_snapshot"
-                },
-                {
-                    "schemaVersion",
-                    1
-                },
-                {
-                    "players",
-                    players
-                }
-            });
-
-
-            last_player_snapshot_sent =
-                now;
-        }
+        last_heartbeat_sent =
+            now;
     }
 
 
@@ -3098,9 +3573,6 @@ namespace
                 last_heartbeat_sent =
                     {};
 
-                last_player_snapshot_sent =
-                    {};
-
 
                 Log::GetLog()->info(
                     "PixelPurge Companion authenticated successfully"
@@ -3446,6 +3918,7 @@ namespace Companion
     )
     {
         if (
+            !config.chat_events_enabled ||
             !authenticated.load() ||
             websocket.getReadyState() !=
                 ix::ReadyState::Open ||
@@ -3620,6 +4093,302 @@ namespace Companion
                 send_mode
             ),
             eos_id
+        );
+    }
+
+
+    void PublishPlayerJoined(
+        APlayerController* player
+    )
+    {
+        if (
+            !config.player_lifecycle_events_enabled ||
+            !authenticated.load() ||
+            !player
+        )
+        {
+            return;
+        }
+
+
+        auto* shooter =
+            static_cast<
+                AShooterPlayerController*
+            >(
+                player
+            );
+
+
+        json player_data =
+            BuildPlayerTelemetry(
+                shooter
+            );
+
+
+        if (
+            player_data.value(
+                "eosId",
+                ""
+            ).empty()
+        )
+        {
+            return;
+        }
+
+
+        SendJson({
+            {
+                "type",
+                "player_joined"
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "player",
+                std::move(
+                    player_data
+                )
+            },
+            {
+                "server",
+                {
+                    {
+                        "serverId",
+                        metadata.server_id
+                    },
+                    {
+                        "clusterId",
+                        metadata.cluster_id
+                    },
+                    {
+                        "sessionName",
+                        metadata.session_name
+                    }
+                }
+            }
+        });
+    }
+
+
+    void PublishPlayerLeft(
+        AController* player
+    )
+    {
+        if (
+            !config.player_lifecycle_events_enabled ||
+            !authenticated.load() ||
+            !player
+        )
+        {
+            return;
+        }
+
+
+        auto* shooter =
+            static_cast<
+                AShooterPlayerController*
+            >(
+                player
+            );
+
+
+        json player_data =
+            BuildPlayerTelemetry(
+                shooter
+            );
+
+
+        if (
+            player_data.value(
+                "eosId",
+                ""
+            ).empty()
+        )
+        {
+            return;
+        }
+
+
+        SendJson({
+            {
+                "type",
+                "player_left"
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "player",
+                std::move(
+                    player_data
+                )
+            },
+            {
+                "server",
+                {
+                    {
+                        "serverId",
+                        metadata.server_id
+                    },
+                    {
+                        "clusterId",
+                        metadata.cluster_id
+                    },
+                    {
+                        "sessionName",
+                        metadata.session_name
+                    }
+                }
+            }
+        });
+    }
+
+
+    void PublishPlayerDeath(
+        AShooterPlayerState* killer_player_state,
+        UDamageType* killer_damage_type,
+        AShooterPlayerState* killed_player_state
+    )
+    {
+        if (
+            !config.combat_events_enabled ||
+            !authenticated.load() ||
+            !killed_player_state
+        )
+        {
+            return;
+        }
+
+
+        auto* killed_controller =
+            killed_player_state
+                ->GetShooterController();
+
+
+        if (!killed_controller)
+        {
+            return;
+        }
+
+
+        json killed =
+            BuildPlayerTelemetry(
+                killed_controller
+            );
+
+
+        if (
+            killed.value(
+                "eosId",
+                ""
+            ).empty()
+        )
+        {
+            return;
+        }
+
+
+        json killer =
+            nullptr;
+
+
+        if (
+            killer_player_state &&
+            killer_player_state !=
+                killed_player_state
+        )
+        {
+            auto* killer_controller =
+                killer_player_state
+                    ->GetShooterController();
+
+
+            if (killer_controller)
+            {
+                json killer_data =
+                    BuildPlayerTelemetry(
+                        killer_controller
+                    );
+
+
+                if (
+                    !killer_data.value(
+                        "eosId",
+                        ""
+                    ).empty()
+                )
+                {
+                    killer =
+                        std::move(
+                            killer_data
+                        );
+                }
+            }
+        }
+
+
+        json event =
+        {
+            {
+                "type",
+                "player_death"
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "killed",
+                std::move(
+                    killed
+                )
+            },
+            {
+                "killer",
+                std::move(
+                    killer
+                )
+            },
+            {
+                "server",
+                {
+                    {
+                        "serverId",
+                        metadata.server_id
+                    },
+                    {
+                        "clusterId",
+                        metadata.cluster_id
+                    },
+                    {
+                        "sessionName",
+                        metadata.session_name
+                    }
+                }
+            }
+        };
+
+
+        (void)killer_damage_type;
+
+
+        SendJson(
+            event
         );
     }
 
@@ -3819,6 +4588,9 @@ namespace Companion
         );
 
 
+        StartOutboundWorker();
+
+
         websocket.start();
 
 
@@ -3897,6 +4669,9 @@ namespace Companion
         authenticated.store(
             false
         );
+
+
+        StopOutboundWorker();
 
 
         websocket.stop();

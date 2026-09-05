@@ -1,4 +1,4 @@
-﻿#include "API/ARK/Ark.h"
+#include "API/ARK/Ark.h"
 
 #include <ixwebsocket/IXNetSystem.h>
 
@@ -10,6 +10,32 @@ DECLARE_HOOK(
     AShooterGameMode_BeginPlay,
     void,
     AShooterGameMode*
+);
+
+
+DECLARE_HOOK(
+    AShooterGameMode_PostLogin,
+    void,
+    AShooterGameMode*,
+    APlayerController*
+);
+
+
+DECLARE_HOOK(
+    AShooterGameMode_Logout,
+    void,
+    AShooterGameMode*,
+    AController*
+);
+
+
+DECLARE_HOOK(
+    AShooterPlayerState_BroadcastDeath_Implementation,
+    void,
+    AShooterPlayerState*,
+    AShooterPlayerState*,
+    UDamageType*,
+    AShooterPlayerState*
 );
 
 
@@ -35,6 +61,64 @@ void Hook_AShooterGameMode_BeginPlay(
 }
 
 
+void Hook_AShooterGameMode_PostLogin(
+    AShooterGameMode* game_mode,
+    APlayerController* new_player
+)
+{
+    AShooterGameMode_PostLogin_original(
+        game_mode,
+        new_player
+    );
+
+
+    Companion::PublishPlayerJoined(
+        new_player
+    );
+}
+
+
+void Hook_AShooterGameMode_Logout(
+    AShooterGameMode* game_mode,
+    AController* exiting
+)
+{
+    /*
+     * Capture identity while the player/controller state still exists.
+     */
+    Companion::PublishPlayerLeft(
+        exiting
+    );
+
+
+    AShooterGameMode_Logout_original(
+        game_mode,
+        exiting
+    );
+}
+
+
+void Hook_AShooterPlayerState_BroadcastDeath_Implementation(
+    AShooterPlayerState* self,
+    AShooterPlayerState* killer_player_state,
+    UDamageType* killer_damage_type,
+    AShooterPlayerState* killed_player_state
+)
+{
+    AShooterPlayerState_BroadcastDeath_Implementation_original(
+        self,
+        killer_player_state,
+        killer_damage_type,
+        killed_player_state
+    );
+
+
+    Companion::PublishPlayerDeath(
+        killer_player_state,
+        killer_damage_type,
+        killed_player_state
+    );
+}
 
 
 void Hook_AShooterPlayerController_ServerSendChatMessage_Implementation(
@@ -103,6 +187,27 @@ void Plugin_Init()
 
 
     AsaApi::GetHooks().SetHook(
+        "AShooterGameMode.PostLogin(APlayerController*)",
+        Hook_AShooterGameMode_PostLogin,
+        &AShooterGameMode_PostLogin_original
+    );
+
+
+    AsaApi::GetHooks().SetHook(
+        "AShooterGameMode.Logout(AController*)",
+        Hook_AShooterGameMode_Logout,
+        &AShooterGameMode_Logout_original
+    );
+
+
+    AsaApi::GetHooks().SetHook(
+        "AShooterPlayerState.BroadcastDeath_Implementation(AShooterPlayerState*,UDamageType*,AShooterPlayerState*)",
+        Hook_AShooterPlayerState_BroadcastDeath_Implementation,
+        &AShooterPlayerState_BroadcastDeath_Implementation_original
+    );
+
+
+    AsaApi::GetHooks().SetHook(
         "AShooterPlayerController.ServerSendChatMessage_Implementation(FString&,EChatSendMode::Type,int)",
         Hook_AShooterPlayerController_ServerSendChatMessage_Implementation,
         &AShooterPlayerController_ServerSendChatMessage_Implementation_original
@@ -157,6 +262,24 @@ void Plugin_Unload()
     AsaApi::GetHooks().DisableHook(
         "AShooterPlayerController.ServerSendChatMessage_Implementation(FString&,EChatSendMode::Type,int)",
         Hook_AShooterPlayerController_ServerSendChatMessage_Implementation
+    );
+
+
+    AsaApi::GetHooks().DisableHook(
+        "AShooterPlayerState.BroadcastDeath_Implementation(AShooterPlayerState*,UDamageType*,AShooterPlayerState*)",
+        Hook_AShooterPlayerState_BroadcastDeath_Implementation
+    );
+
+
+    AsaApi::GetHooks().DisableHook(
+        "AShooterGameMode.Logout(AController*)",
+        Hook_AShooterGameMode_Logout
+    );
+
+
+    AsaApi::GetHooks().DisableHook(
+        "AShooterGameMode.PostLogin(APlayerController*)",
+        Hook_AShooterGameMode_PostLogin
     );
 
 
