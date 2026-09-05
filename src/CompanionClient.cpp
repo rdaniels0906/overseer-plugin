@@ -44,7 +44,7 @@ namespace
 
     constexpr const char*
         PLUGIN_VERSION =
-            "0.6.0";
+            "0.7.0";
 
 
     struct CompanionConfig
@@ -2980,6 +2980,10 @@ namespace
             {
                 "ping",
                 nullptr
+            },
+            {
+                "position",
+                nullptr
             }
         };
 
@@ -3001,6 +3005,32 @@ namespace
             "eosId"
         ] =
             eos.ToString();
+
+
+        const FVector position =
+            AsaApi::GetApiUtils()
+                .GetPosition(
+                    shooter
+                );
+
+
+        player[
+            "position"
+        ] =
+        {
+            {
+                "x",
+                position.X
+            },
+            {
+                "y",
+                position.Y
+            },
+            {
+                "z",
+                position.Z
+            }
+        };
 
 
         FString survivor_name;
@@ -3587,6 +3617,567 @@ namespace
         });
     }
 
+
+
+    json
+    BuildInventoryItemTelemetry(
+        UPrimalItem* item
+    )
+    {
+        if (!item)
+        {
+            return nullptr;
+        }
+
+
+        FString item_name;
+
+
+        /*
+         * Exact usage mirrors AsaApi's own ArkApiUtils:
+         *
+         * item->GetItemName(&name, true, false, nullptr);
+         * item->GetItemQuantity();
+         */
+        item->GetItemName(
+            &item_name,
+            true,
+            false,
+            nullptr
+        );
+
+
+        return {
+            {
+                "name",
+                item_name
+                    .ToStringUTF8()
+            },
+            {
+                "quantity",
+                item
+                    ->GetItemQuantity()
+            }
+        };
+    }
+
+
+    json
+    BuildPlayerInventoryTelemetry(
+        AShooterPlayerController* shooter
+    )
+    {
+        json result =
+        {
+            {
+                "items",
+                json::array()
+            },
+            {
+                "equipped",
+                json::array()
+            }
+        };
+
+
+        if (!shooter)
+        {
+            return result;
+        }
+
+
+        UPrimalInventoryComponent* inventory =
+            shooter
+                ->GetPlayerInventory();
+
+
+        if (!inventory)
+        {
+            return result;
+        }
+
+
+        for (
+            UPrimalItem* item :
+            inventory
+                ->InventoryItemsField()
+        )
+        {
+            if (!item)
+            {
+                continue;
+            }
+
+
+            result[
+                "items"
+            ].push_back(
+                BuildInventoryItemTelemetry(
+                    item
+                )
+            );
+        }
+
+
+        for (
+            UPrimalItem* item :
+            inventory
+                ->EquippedItemsField()
+        )
+        {
+            if (!item)
+            {
+                continue;
+            }
+
+
+            result[
+                "equipped"
+            ].push_back(
+                BuildInventoryItemTelemetry(
+                    item
+                )
+            );
+        }
+
+
+        return result;
+    }
+
+
+    AShooterPlayerController*
+    FindPlayerByEosId(
+        const std::string& eos_id
+    )
+    {
+        if (eos_id.empty())
+        {
+            return nullptr;
+        }
+
+
+        auto* world =
+            AsaApi::GetApiUtils()
+                .GetWorld();
+
+
+        if (!world)
+        {
+            return nullptr;
+        }
+
+
+        auto& controllers =
+            world
+                ->PlayerControllerListField();
+
+
+        for (
+            auto& weak_controller :
+            controllers
+        )
+        {
+            APlayerController* controller =
+                weak_controller.Get();
+
+
+            if (!controller)
+            {
+                continue;
+            }
+
+
+            auto* shooter =
+                static_cast<
+                    AShooterPlayerController*
+                >(
+                    controller
+                );
+
+
+            const FString player_eos =
+                AsaApi::IApiUtils::
+                    GetEOSIDFromController(
+                        shooter
+                    );
+
+
+            if (
+                player_eos.ToString() ==
+                eos_id
+            )
+            {
+                return shooter;
+            }
+        }
+
+
+        return nullptr;
+    }
+
+
+    json
+    GetPlayerInventoryRequest(
+        const json& payload
+    )
+    {
+        const std::string eos_id =
+            payload.value(
+                "eosId",
+                ""
+            );
+
+
+        if (eos_id.empty())
+        {
+            throw std::runtime_error(
+                "GetPlayerInventory requires eosId."
+            );
+        }
+
+
+        AShooterPlayerController* shooter =
+            FindPlayerByEosId(
+                eos_id
+            );
+
+
+        if (!shooter)
+        {
+            throw std::runtime_error(
+                "Player is not online on this server."
+            );
+        }
+
+
+        json result =
+            BuildPlayerInventoryTelemetry(
+                shooter
+            );
+
+
+        result[
+            "player"
+        ] =
+            BuildPlayerTelemetry(
+                shooter
+            );
+
+
+        result[
+            "server"
+        ] =
+            BuildServerIdentity();
+
+
+        return result;
+    }
+
+    json
+    BuildPlayerProgressionTelemetry(
+        AShooterPlayerController* shooter
+    )
+    {
+        if (!shooter)
+        {
+            throw std::runtime_error(
+                "Player controller was null."
+            );
+        }
+
+
+        APlayerState* raw_player_state =
+            shooter
+                ->PlayerStateField()
+                .Get();
+
+
+        auto* shooter_state =
+            static_cast<
+                AShooterPlayerState*
+            >(
+                raw_player_state
+            );
+
+
+        if (!shooter_state)
+        {
+            throw std::runtime_error(
+                "Player state was unavailable."
+            );
+        }
+
+
+        FPrimalPlayerDataStruct&
+            player_data =
+                shooter_state
+                    ->MyPlayerDataStructField();
+
+
+        FPrimalPersistentCharacterStatsStruct&
+            persistent =
+                player_data
+                    .MyPersistentCharacterStatsField();
+
+
+        auto& learned_engrams =
+            persistent
+                .PlayerState_EngramBlueprintsField();
+
+
+        json learned_engram_list =
+            json::array();
+
+
+        UPrimalGameData* game_data =
+            AsaApi::GetApiUtils()
+                .GetGameData();
+
+
+        for (
+            const auto& learned_engram :
+            learned_engrams
+        )
+        {
+            UClass* item_class =
+                learned_engram.uClass;
+
+
+            if (!item_class)
+            {
+                continue;
+            }
+
+
+            FString class_path =
+                item_class
+                    ->GetPathName(
+                        nullptr
+                    );
+
+
+            FString item_name;
+
+
+            UPrimalEngramEntry* engram_entry =
+                nullptr;
+
+
+            if (game_data)
+            {
+                auto& item_engram_map =
+                    game_data
+                        ->ItemEngramMapField();
+
+
+                UPrimalEngramEntry** found_entry =
+                    item_engram_map
+                        .Find(
+                            item_class
+                        );
+
+
+                if (found_entry)
+                {
+                    engram_entry =
+                        *found_entry;
+                }
+            }
+
+
+            const bool engram_entry_found =
+                engram_entry != nullptr;
+
+
+            bool is_tek =
+                false;
+
+
+            if (engram_entry_found)
+            {
+                is_tek =
+                    engram_entry
+                        ->bForceIsTekEngramField()
+                        .Get();
+            }
+
+
+            UObject* default_object =
+                item_class
+                    ->GetDefaultObject(
+                        true
+                    );
+
+
+            auto* item_cdo =
+                static_cast<
+                    UPrimalItem*
+                >(
+                    default_object
+                );
+
+
+            if (item_cdo)
+            {
+                item_cdo
+                    ->GetItemName(
+                        &item_name,
+                        false,
+                        false,
+                        shooter
+                    );
+            }
+
+
+            learned_engram_list.push_back(
+                {
+                    {
+                        "name",
+                        item_name.ToString()
+                    },
+                    {
+                        "classPath",
+                        class_path.ToString()
+                    },
+                    {
+                        "engramEntryFound",
+                        engram_entry_found
+                    },
+                    {
+                        "isTek",
+                        is_tek
+                    }
+                }
+            );
+        }
+
+
+        auto& explorer_notes =
+            persistent
+                .PerMapExplorerNoteUnlocksField();
+
+
+        json result =
+        {
+            {
+                "extraCharacterLevel",
+                persistent
+                    .CharacterStatusComponent_ExtraCharacterLevelField()
+            },
+            {
+                "highestExtraCharacterLevel",
+                persistent
+                    .CharacterStatusComponent_HighestExtraCharacterLevelField()
+            },
+            {
+                "engramPoints",
+                {
+                    {
+                        "total",
+                        persistent
+                            .PlayerState_TotalEngramPointsField()
+                    },
+                    {
+                        "purchased",
+                        persistent
+                            .PlayerState_PurchasedEngramPointsField()
+                    }
+                }
+            },
+            {
+                "learnedEngramCount",
+                static_cast<int>(
+                    learned_engrams.Num()
+                )
+            },
+            {
+                "learnedEngrams",
+                learned_engram_list
+            },
+            {
+                "perMapExplorerNoteUnlockCount",
+                static_cast<int>(
+                    explorer_notes.Num()
+                )
+            },
+            {
+                "deaths",
+                player_data
+                    .NumOfDeathsField()
+            },
+            {
+                "personalDinoCount",
+                player_data
+                    .NumPersonalDinosField()
+            },
+            {
+                "playerDataVersion",
+                player_data
+                    .PlayerDataVersionField()
+            }
+        };
+
+
+        return result;
+    }
+
+
+    json
+    GetPlayerProgressionRequest(
+        const json& payload
+    )
+    {
+        const std::string eos_id =
+            payload.value(
+                "eosId",
+                ""
+            );
+
+
+        if (eos_id.empty())
+        {
+            throw std::runtime_error(
+                "GetPlayerProgression requires eosId."
+            );
+        }
+
+
+        AShooterPlayerController* shooter =
+            FindPlayerByEosId(
+                eos_id
+            );
+
+
+        if (!shooter)
+        {
+            throw std::runtime_error(
+                "Player is not online on this server."
+            );
+        }
+
+
+        json result =
+            BuildPlayerProgressionTelemetry(
+                shooter
+            );
+
+
+        result[
+            "player"
+        ] =
+            BuildPlayerTelemetry(
+                shooter
+            );
+
+
+        result[
+            "server"
+        ] =
+            BuildServerIdentity();
+
+
+        return result;
+    }
 
     json
     DeliverChatMessage(
@@ -4508,6 +5099,90 @@ namespace
 
 
         
+
+
+        if (
+            request.action ==
+            "GetPlayerInventory"
+        )
+        {
+            try
+            {
+                const json result =
+                    GetPlayerInventoryRequest(
+                        request.payload
+                    );
+
+
+                SendResponse(
+                    request.request_id,
+                    true,
+                    "",
+                    result
+                );
+            }
+            catch (
+                const std::exception& error
+            )
+            {
+                SendResponse(
+                    request.request_id,
+                    false,
+                    error.what()
+                );
+
+
+                Log::GetLog()->warn(
+                    "GetPlayerInventory failed: {}",
+                    error.what()
+                );
+            }
+
+
+            return;
+        }
+
+
+        if (
+            request.action ==
+            "GetPlayerProgression"
+        )
+        {
+            try
+            {
+                const json result =
+                    GetPlayerProgressionRequest(
+                        request.payload
+                    );
+
+
+                SendResponse(
+                    request.request_id,
+                    true,
+                    "",
+                    result
+                );
+            }
+            catch (
+                const std::exception& error
+            )
+            {
+                SendResponse(
+                    request.request_id,
+                    false,
+                    error.what()
+                );
+
+
+                Log::GetLog()->warn(
+                    "GetPlayerProgression failed: {}",
+                    error.what()
+                );
+            }
+
+
+            return;
+        }
 
 
 if (
