@@ -2978,10 +2978,6 @@ namespace
                 nullptr
             },
             {
-                "ping",
-                nullptr
-            },
-            {
                 "position",
                 nullptr
             }
@@ -3066,12 +3062,6 @@ namespace
                 player_state
                     ->GetCharacterLevel();
 
-
-            player[
-                "ping"
-            ] =
-                player_state
-                    ->ExactPingV2Field();
 
 
             if (
@@ -3697,10 +3687,27 @@ namespace
         }
 
 
+        TArray<
+            UPrimalItem*,
+            TSizedDefaultAllocator<32>
+        > filtered_inventory_items;
+
+
+        auto& raw_inventory_items =
+            inventory
+                ->InventoryItemsField();
+
+
+        inventory
+            ->InventoryCustomFilter_Implementation(
+                &raw_inventory_items,
+                &filtered_inventory_items
+            );
+
+
         for (
             UPrimalItem* item :
-            inventory
-                ->InventoryItemsField()
+            filtered_inventory_items
         )
         {
             if (!item)
@@ -3920,145 +3927,12 @@ namespace
                     .MyPersistentCharacterStatsField();
 
 
-        auto& learned_engrams =
-            persistent
-                .PlayerState_EngramBlueprintsField();
-
-
-        json learned_engram_list =
-            json::array();
-
-
-        UPrimalGameData* game_data =
-            AsaApi::GetApiUtils()
-                .GetGameData();
-
-
-        for (
-            const auto& learned_engram :
-            learned_engrams
-        )
-        {
-            UClass* item_class =
-                learned_engram.uClass;
-
-
-            if (!item_class)
-            {
-                continue;
-            }
-
-
-            FString class_path =
-                item_class
-                    ->GetPathName(
-                        nullptr
-                    );
-
-
-            FString item_name;
-
-
-            UPrimalEngramEntry* engram_entry =
-                nullptr;
-
-
-            if (game_data)
-            {
-                auto& item_engram_map =
-                    game_data
-                        ->ItemEngramMapField();
-
-
-                UPrimalEngramEntry** found_entry =
-                    item_engram_map
-                        .Find(
-                            item_class
-                        );
-
-
-                if (found_entry)
-                {
-                    engram_entry =
-                        *found_entry;
-                }
-            }
-
-
-            const bool engram_entry_found =
-                engram_entry != nullptr;
-
-
-            bool is_tek =
-                false;
-
-
-            if (engram_entry_found)
-            {
-                is_tek =
-                    engram_entry
-                        ->bForceIsTekEngramField()
-                        .Get();
-            }
-
-
-            UObject* default_object =
-                item_class
-                    ->GetDefaultObject(
-                        true
-                    );
-
-
-            auto* item_cdo =
-                static_cast<
-                    UPrimalItem*
-                >(
-                    default_object
-                );
-
-
-            if (item_cdo)
-            {
-                item_cdo
-                    ->GetItemName(
-                        &item_name,
-                        false,
-                        false,
-                        shooter
-                    );
-            }
-
-
-            learned_engram_list.push_back(
-                {
-                    {
-                        "name",
-                        item_name.ToString()
-                    },
-                    {
-                        "classPath",
-                        class_path.ToString()
-                    },
-                    {
-                        "engramEntryFound",
-                        engram_entry_found
-                    },
-                    {
-                        "isTek",
-                        is_tek
-                    }
-                }
-            );
-        }
-
-
         auto& explorer_notes =
             persistent
                 .PerMapExplorerNoteUnlocksField();
 
 
-        json result =
-        {
+        return {
             {
                 "extraCharacterLevel",
                 persistent
@@ -4068,31 +3942,6 @@ namespace
                 "highestExtraCharacterLevel",
                 persistent
                     .CharacterStatusComponent_HighestExtraCharacterLevelField()
-            },
-            {
-                "engramPoints",
-                {
-                    {
-                        "total",
-                        persistent
-                            .PlayerState_TotalEngramPointsField()
-                    },
-                    {
-                        "purchased",
-                        persistent
-                            .PlayerState_PurchasedEngramPointsField()
-                    }
-                }
-            },
-            {
-                "learnedEngramCount",
-                static_cast<int>(
-                    learned_engrams.Num()
-                )
-            },
-            {
-                "learnedEngrams",
-                learned_engram_list
             },
             {
                 "perMapExplorerNoteUnlockCount",
@@ -4116,9 +3965,6 @@ namespace
                     .PlayerDataVersionField()
             }
         };
-
-
-        return result;
     }
 
 
@@ -4212,17 +4058,31 @@ namespace
             );
 
 
-        const std::string sender_id =
+        const std::string sender_name =
             payload.value(
-                "senderId",
+                "senderName",
                 "Overseer"
             );
 
 
-        const bool bold =
+        const std::string sender_steam_name =
             payload.value(
-                "bold",
-                false
+                "senderSteamName",
+                ""
+            );
+
+
+        const std::string sender_tribe_name =
+            payload.value(
+                "senderTribeName",
+                ""
+            );
+
+
+        const unsigned int sender_id =
+            payload.value(
+                "senderId",
+                0u
             );
 
 
@@ -4289,65 +4149,52 @@ namespace
         }
 
 
-        FLinearColor color(
-            0.4f,
-            1.0f,
-            1.0f,
-            1.0f
-        );
+        FString native_sender_name =
+            FString::FromStringUTF8(
+                sender_name
+            );
 
 
-        if (
-            payload.contains(
-                "color"
-            ) &&
-            payload[
-                "color"
-            ].is_object()
-        )
-        {
-            const auto& requested =
-                payload[
-                    "color"
-                ];
+        FString native_sender_steam_name =
+            FString::FromStringUTF8(
+                sender_steam_name
+            );
 
 
-            color.R =
-                requested.value(
-                    "r",
-                    color.R
-                );
-
-            color.G =
-                requested.value(
-                    "g",
-                    color.G
-                );
-
-            color.B =
-                requested.value(
-                    "b",
-                    color.B
-                );
-
-            color.A =
-                requested.value(
-                    "a",
-                    color.A
-                );
-        }
+        FString native_sender_tribe_name =
+            FString::FromStringUTF8(
+                sender_tribe_name
+            );
 
 
-        FString text =
+        FString native_message =
             FString::FromStringUTF8(
                 message
             );
 
 
-        FString sender =
-            FString::FromStringUTF8(
-                sender_id
-            );
+        FString native_receiver;
+
+
+        FPrimalChatMessage chat_message;
+
+        chat_message.SenderName =
+            native_sender_name;
+
+        chat_message.SenderSteamName =
+            native_sender_steam_name;
+
+        chat_message.SenderTribeName =
+            native_sender_tribe_name;
+
+        chat_message.SenderId =
+            sender_id;
+
+        chat_message.Message =
+            native_message;
+
+        chat_message.Receiver =
+            native_receiver;
 
 
         int delivered =
@@ -4459,19 +4306,9 @@ namespace
             }
 
 
-            /*
-             * Verified ASA client RPC wrapper.
-             *
-             * We deliberately target each matching controller.
-             * That makes TRIBE and PLAYER audiences impossible
-             * to leak to unrelated players.
-             */
             shooter
-                ->ClientServerChatDirectMessage(
-                    &text,
-                    color,
-                    bold,
-                    &sender
+                ->ClientChatMessage_Implementation(
+                    &chat_message
                 );
 
 
@@ -6007,64 +5844,19 @@ namespace Companion
         float killing_damage
     )
     {
-        if (
-            !config.tame_events_enabled ||
-            !authenticated.load() ||
-            !dino
-        )
-        {
-            return;
-        }
-
-
         /*
-         * APrimalDinoCharacter::Die also runs for wild dinos.
+         * APrimalDinoCharacter::Die is generic and fires for
+         * wild creatures too.
          *
-         * TamerString is populated by ASA's tame path and lets
-         * this lifecycle event remain scoped to actual tames.
+         * Live testing proved that TamerString / ownership-looking
+         * values are not reliable proof that the dead creature
+         * was actually tame.
+         *
+         * Suppress DINO_DIED until a verified tame-only state or
+         * dedicated hook is available.
          */
-        const std::string tamer =
-            dino
-                ->TamerStringField()
-                .ToStringUTF8();
-
-
-        if (
-            tamer.empty()
-        )
-        {
-            return;
-        }
-
-
-        SendJson({
-            {
-                "type",
-                "dino_died"
-            },
-            {
-                "schemaVersion",
-                1
-            },
-            {
-                "eventId",
-                GenerateCompanionGuid()
-            },
-            {
-                "dino",
-                BuildDinoTelemetry(
-                    dino
-                )
-            },
-            {
-                "killingDamage",
-                killing_damage
-            },
-            {
-                "server",
-                BuildServerIdentity()
-            }
-        });
+        (void)dino;
+        (void)killing_damage;
     }
 
 
