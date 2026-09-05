@@ -15,6 +15,16 @@
     "chatEvents": {
       "enabled": true
     },
+    "serverMetrics": {
+      "enabled": true,
+      "intervalSeconds": 2
+    },
+    "tribeEvents": {
+      "enabled": true
+    },
+    "tameEvents": {
+      "enabled": true
+    },
     "maxTelemetryQueueSize": 1000,
     "dropOldTelemetryWhenFull": true
   }

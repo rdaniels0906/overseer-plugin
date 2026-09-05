@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <bcrypt.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -43,7 +44,7 @@ namespace
 
     constexpr const char*
         PLUGIN_VERSION =
-            "0.4.0";
+            "0.6.0";
 
 
     struct CompanionConfig
@@ -77,6 +78,18 @@ namespace
             true;
 
         bool chat_events_enabled =
+            true;
+
+        bool server_metrics_enabled =
+            true;
+
+        int server_metrics_interval_seconds =
+            2;
+
+        bool tribe_events_enabled =
+            true;
+
+        bool tame_events_enabled =
             true;
 
         int max_telemetry_queue_size =
@@ -173,6 +186,15 @@ namespace
     std::atomic<std::uint64_t>
         dropped_telemetry =
             0;
+
+
+    std::thread
+        server_metrics_thread;
+
+
+    std::atomic<bool>
+        server_metrics_running =
+            false;
 
 
 
@@ -1453,6 +1475,37 @@ namespace
                         }
                     },
                     {
+                        "serverMetrics",
+                        {
+                            {
+                                "enabled",
+                                value.server_metrics_enabled
+                            },
+                            {
+                                "intervalSeconds",
+                                value.server_metrics_interval_seconds
+                            }
+                        }
+                    },
+                    {
+                        "tribeEvents",
+                        {
+                            {
+                                "enabled",
+                                value.tribe_events_enabled
+                            }
+                        }
+                    },
+                    {
+                        "tameEvents",
+                        {
+                            {
+                                "enabled",
+                                value.tame_events_enabled
+                            }
+                        }
+                    },
+                    {
                         "maxTelemetryQueueSize",
                         value.max_telemetry_queue_size
                     },
@@ -1677,6 +1730,77 @@ namespace
             }
 
 
+            if (
+                telemetry.contains(
+                    "serverMetrics"
+                ) &&
+                telemetry[
+                    "serverMetrics"
+                ].is_object()
+            )
+            {
+                const auto& server_metrics =
+                    telemetry[
+                        "serverMetrics"
+                    ];
+
+
+                result.server_metrics_enabled =
+                    server_metrics.value(
+                        "enabled",
+                        true
+                    );
+
+
+                result.server_metrics_interval_seconds =
+                    (std::max)(
+                        1,
+                        server_metrics.value(
+                            "intervalSeconds",
+                            2
+                        )
+                    );
+            }
+
+
+            if (
+                telemetry.contains(
+                    "tribeEvents"
+                ) &&
+                telemetry[
+                    "tribeEvents"
+                ].is_object()
+            )
+            {
+                result.tribe_events_enabled =
+                    telemetry[
+                        "tribeEvents"
+                    ].value(
+                        "enabled",
+                        true
+                    );
+            }
+
+
+            if (
+                telemetry.contains(
+                    "tameEvents"
+                ) &&
+                telemetry[
+                    "tameEvents"
+                ].is_object()
+            )
+            {
+                result.tame_events_enabled =
+                    telemetry[
+                        "tameEvents"
+                    ].value(
+                        "enabled",
+                        true
+                    );
+            }
+
+
             result.max_telemetry_queue_size =
                 (std::max)(
                     100,
@@ -1849,6 +1973,26 @@ namespace
             ) ||
             !data.contains(
                 "telemetry"
+            ) ||
+            (
+                data.contains(
+                    "telemetry"
+                ) &&
+                data[
+                    "telemetry"
+                ].is_object() &&
+                (
+                    !data[
+                        "telemetry"
+                    ].contains(
+                        "tribeEvents"
+                    ) ||
+                    !data[
+                        "telemetry"
+                    ].contains(
+                        "tameEvents"
+                    )
+                )
             )
         )
         {
@@ -2426,6 +2570,378 @@ namespace
     }
 
 
+    std::uint64_t
+    FileTimeToUInt64(
+        const FILETIME& value
+    )
+    {
+        ULARGE_INTEGER converted{};
+
+        converted.LowPart =
+            value.dwLowDateTime;
+
+        converted.HighPart =
+            value.dwHighDateTime;
+
+
+        return converted.QuadPart;
+    }
+
+
+    const char*
+    WebSocketStateName()
+    {
+        switch (
+            websocket.getReadyState()
+        )
+        {
+            case ix::ReadyState::Open:
+                return "OPEN";
+
+            case ix::ReadyState::Connecting:
+                return "CONNECTING";
+
+            case ix::ReadyState::Closing:
+                return "CLOSING";
+
+            case ix::ReadyState::Closed:
+                return "CLOSED";
+
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+
+    void
+    StartServerMetricsWorker()
+    {
+        if (
+            !config.server_metrics_enabled ||
+            server_metrics_running.exchange(
+                true
+            )
+        )
+        {
+            return;
+        }
+
+
+        server_metrics_thread =
+            std::thread(
+                []()
+                {
+                    HANDLE process =
+                        GetCurrentProcess();
+
+
+                    SYSTEM_INFO system_info{};
+
+                    GetSystemInfo(
+                        &system_info
+                    );
+
+
+                    const DWORD logical_processors =
+                        (std::max)(
+                            1UL,
+                            system_info.dwNumberOfProcessors
+                        );
+
+
+                    std::uint64_t previous_process_time =
+                        0;
+
+                    std::uint64_t previous_wall_time =
+                        0;
+
+
+                    while (
+                        server_metrics_running.load()
+                    )
+                    {
+                        FILETIME creation_time{};
+                        FILETIME exit_time{};
+                        FILETIME kernel_time{};
+                        FILETIME user_time{};
+
+                        FILETIME current_time{};
+
+
+                        GetSystemTimeAsFileTime(
+                            &current_time
+                        );
+
+
+                        double cpu_percent =
+                            0.0;
+
+
+                        std::uint64_t uptime_seconds =
+                            0;
+
+
+                        if (
+                            GetProcessTimes(
+                                process,
+                                &creation_time,
+                                &exit_time,
+                                &kernel_time,
+                                &user_time
+                            )
+                        )
+                        {
+                            const std::uint64_t process_time =
+                                FileTimeToUInt64(
+                                    kernel_time
+                                ) +
+                                FileTimeToUInt64(
+                                    user_time
+                                );
+
+
+                            const std::uint64_t wall_time =
+                                FileTimeToUInt64(
+                                    current_time
+                                );
+
+
+                            const std::uint64_t creation =
+                                FileTimeToUInt64(
+                                    creation_time
+                                );
+
+
+                            if (
+                                wall_time >=
+                                creation
+                            )
+                            {
+                                uptime_seconds =
+                                    (
+                                        wall_time -
+                                        creation
+                                    ) /
+                                    10000000ULL;
+                            }
+
+
+                            if (
+                                previous_process_time !=
+                                    0 &&
+                                previous_wall_time !=
+                                    0 &&
+                                wall_time >
+                                    previous_wall_time &&
+                                process_time >=
+                                    previous_process_time
+                            )
+                            {
+                                const double process_delta =
+                                    static_cast<double>(
+                                        process_time -
+                                        previous_process_time
+                                    );
+
+
+                                const double wall_delta =
+                                    static_cast<double>(
+                                        wall_time -
+                                        previous_wall_time
+                                    );
+
+
+                                cpu_percent =
+                                    (
+                                        process_delta /
+                                        wall_delta
+                                    ) *
+                                    100.0 /
+                                    static_cast<double>(
+                                        logical_processors
+                                    );
+
+
+                                cpu_percent =
+                                    (std::max)(
+                                        0.0,
+                                        (std::min)(
+                                            100.0,
+                                            cpu_percent
+                                        )
+                                    );
+                            }
+
+
+                            previous_process_time =
+                                process_time;
+
+                            previous_wall_time =
+                                wall_time;
+                        }
+
+
+                        PROCESS_MEMORY_COUNTERS_EX memory{};
+
+                        memory.cb =
+                            sizeof(
+                                memory
+                            );
+
+
+                        std::uint64_t working_set_bytes =
+                            0;
+
+
+                        if (
+                            GetProcessMemoryInfo(
+                                process,
+                                reinterpret_cast<
+                                    PROCESS_MEMORY_COUNTERS*
+                                >(
+                                    &memory
+                                ),
+                                sizeof(
+                                    memory
+                                )
+                            )
+                        )
+                        {
+                            working_set_bytes =
+                                static_cast<
+                                    std::uint64_t
+                                >(
+                                    memory.WorkingSetSize
+                                );
+                        }
+
+
+                        std::size_t queue_depth =
+                            0;
+
+
+                        {
+                            std::lock_guard lock(
+                                outbound_mutex
+                            );
+
+
+                            queue_depth =
+                                outbound_messages.size();
+                        }
+
+
+                        if (
+                            authenticated.load()
+                        )
+                        {
+                            SendJson({
+                                {
+                                    "type",
+                                    "server_metrics"
+                                },
+                                {
+                                    "schemaVersion",
+                                    1
+                                },
+                                {
+                                    "cpuPercent",
+                                    cpu_percent
+                                },
+                                {
+                                    "workingSetBytes",
+                                    working_set_bytes
+                                },
+                                {
+                                    "uptimeSeconds",
+                                    uptime_seconds
+                                },
+                                {
+                                    "websocketState",
+                                    WebSocketStateName()
+                                },
+                                {
+                                    "authenticated",
+                                    authenticated.load()
+                                },
+                                {
+                                    "outboundQueueDepth",
+                                    queue_depth
+                                },
+                                {
+                                    "droppedTelemetry",
+                                    dropped_telemetry.load()
+                                },
+                                {
+                                    "server",
+                                    {
+                                        {
+                                            "serverId",
+                                            metadata.server_id
+                                        },
+                                        {
+                                            "clusterId",
+                                            metadata.cluster_id
+                                        },
+                                        {
+                                            "sessionName",
+                                            metadata.session_name
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+
+                        const int interval_seconds =
+                            (std::max)(
+                                1,
+                                config.server_metrics_interval_seconds
+                            );
+
+
+                        for (
+                            int elapsed = 0;
+                            elapsed <
+                                interval_seconds * 10 &&
+                            server_metrics_running.load();
+                            ++elapsed
+                        )
+                        {
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(
+                                    100
+                                )
+                            );
+                        }
+                    }
+                }
+            );
+    }
+
+
+    void
+    StopServerMetricsWorker()
+    {
+        if (
+            !server_metrics_running.exchange(
+                false
+            )
+        )
+        {
+            return;
+        }
+
+
+        if (
+            server_metrics_thread.joinable()
+        )
+        {
+            server_metrics_thread.join();
+        }
+    }
+
+
     json
     BuildPlayerTelemetry(
         AShooterPlayerController* shooter
@@ -2752,6 +3268,323 @@ namespace
 
 
         return true;
+    }
+
+
+    json
+    BuildServerIdentity()
+    {
+        return {
+            {
+                "serverId",
+                metadata.server_id
+            },
+            {
+                "clusterId",
+                metadata.cluster_id
+            },
+            {
+                "sessionName",
+                metadata.session_name
+            }
+        };
+    }
+
+
+    json
+    BuildPlayerStateTelemetry(
+        AShooterPlayerState* player_state
+    )
+    {
+        if (!player_state)
+        {
+            return nullptr;
+        }
+
+
+        auto* controller =
+            player_state
+                ->GetShooterController();
+
+
+        if (!controller)
+        {
+            return nullptr;
+        }
+
+
+        json player =
+            BuildPlayerTelemetry(
+                controller
+            );
+
+
+        if (
+            player.value(
+                "eosId",
+                ""
+            ).empty()
+        )
+        {
+            return nullptr;
+        }
+
+
+        return player;
+    }
+
+
+    json
+    BuildDinoTelemetry(
+        APrimalDinoCharacter* dino
+    )
+    {
+        if (!dino)
+        {
+            return nullptr;
+        }
+
+
+        const unsigned int id1 =
+            dino
+                ->DinoID1Field();
+
+
+        const unsigned int id2 =
+            dino
+                ->DinoID2Field();
+
+
+        const std::uint64_t dino_id =
+            (
+                static_cast<std::uint64_t>(
+                    id1
+                ) <<
+                32
+            ) |
+            static_cast<std::uint64_t>(
+                id2
+            );
+
+
+        return {
+            {
+                "dinoId",
+                std::to_string(
+                    dino_id
+                )
+            },
+            {
+                "dinoId1",
+                id1
+            },
+            {
+                "dinoId2",
+                id2
+            },
+            {
+                "teamId",
+                dino
+                    ->TargetingTeamField()
+            },
+            {
+                "tamingTeamId",
+                dino
+                    ->TamingTeamIDField()
+            },
+            {
+                "owningPlayerId",
+                dino
+                    ->OwningPlayerIDField()
+            },
+            {
+                "owningPlayerName",
+                dino
+                    ->OwningPlayerNameField()
+                    .ToStringUTF8()
+            },
+            {
+                "tamer",
+                dino
+                    ->TamerStringField()
+                    .ToStringUTF8()
+            },
+            {
+                "tamedName",
+                dino
+                    ->TamedNameField()
+                    .ToStringUTF8()
+            }
+        };
+    }
+
+
+    void
+    PublishTribeEventInternal(
+        const char* type,
+        AShooterPlayerState* player_state,
+        const FString* tribe_name,
+        const FString* player_name,
+        bool joinee
+    )
+    {
+        if (
+            !config.tribe_events_enabled ||
+            !authenticated.load() ||
+            !type
+        )
+        {
+            return;
+        }
+
+
+        json player =
+            BuildPlayerStateTelemetry(
+                player_state
+            );
+
+
+        SendJson({
+            {
+                "type",
+                type
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "player",
+                std::move(
+                    player
+                )
+            },
+            {
+                "playerName",
+                player_name
+                    ? json(
+                        player_name
+                            ->ToStringUTF8()
+                    )
+                    : json(
+                        nullptr
+                    )
+            },
+            {
+                "tribeName",
+                tribe_name
+                    ? json(
+                        tribe_name
+                            ->ToStringUTF8()
+                    )
+                    : json(
+                        nullptr
+                    )
+            },
+            {
+                "tribeId",
+                (
+                    player_state &&
+                    player_state
+                        ->IsInTribe()
+                )
+                    ? json(
+                        player_state
+                            ->GetTribeId()
+                    )
+                    : json(
+                        nullptr
+                    )
+            },
+            {
+                "joinee",
+                joinee
+            },
+            {
+                "server",
+                BuildServerIdentity()
+            }
+        });
+    }
+
+
+    void
+    PublishTameEventInternal(
+        const char* type,
+        APrimalDinoCharacter* dino,
+        AShooterPlayerController* player
+    )
+    {
+        if (
+            !config.tame_events_enabled ||
+            !authenticated.load() ||
+            !type ||
+            !dino
+        )
+        {
+            return;
+        }
+
+
+        json player_data =
+            nullptr;
+
+
+        if (player)
+        {
+            player_data =
+                BuildPlayerTelemetry(
+                    player
+                );
+
+
+            if (
+                player_data.value(
+                    "eosId",
+                    ""
+                ).empty()
+            )
+            {
+                player_data =
+                    nullptr;
+            }
+        }
+
+
+        SendJson({
+            {
+                "type",
+                type
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "dino",
+                BuildDinoTelemetry(
+                    dino
+                )
+            },
+            {
+                "player",
+                std::move(
+                    player_data
+                )
+            },
+            {
+                "server",
+                BuildServerIdentity()
+            }
+        });
     }
 
 
@@ -4393,6 +5226,173 @@ namespace Companion
     }
 
 
+    void PublishTribeCreated(
+        AShooterPlayerState* player_state,
+        const FString* tribe_name
+    )
+    {
+        PublishTribeEventInternal(
+            "tribe_created",
+            player_state,
+            tribe_name,
+            nullptr,
+            true
+        );
+    }
+
+
+    void PublishTribeRenamed(
+        AShooterPlayerState* player_state,
+        const FString* tribe_name
+    )
+    {
+        PublishTribeEventInternal(
+            "tribe_renamed",
+            player_state,
+            tribe_name,
+            nullptr,
+            false
+        );
+    }
+
+
+    void PublishTribeJoined(
+        AShooterPlayerState* player_state,
+        const FString* player_name,
+        const FString* tribe_name,
+        bool joinee
+    )
+    {
+        PublishTribeEventInternal(
+            "tribe_joined",
+            player_state,
+            tribe_name,
+            player_name,
+            joinee
+        );
+    }
+
+
+    void PublishTribeLeft(
+        AShooterPlayerState* player_state,
+        const FString* player_name,
+        const FString* tribe_name,
+        bool joinee
+    )
+    {
+        PublishTribeEventInternal(
+            "tribe_left",
+            player_state,
+            tribe_name,
+            player_name,
+            joinee
+        );
+    }
+
+
+    void PublishTamed(
+        APrimalDinoCharacter* dino,
+        AShooterPlayerController* player
+    )
+    {
+        PublishTameEventInternal(
+            "dino_tamed",
+            dino,
+            player
+        );
+    }
+
+
+    void PublishUntamed(
+        APrimalDinoCharacter* dino
+    )
+    {
+        PublishTameEventInternal(
+            "dino_untamed",
+            dino,
+            nullptr
+        );
+    }
+
+
+    void PublishUnclaimed(
+        APrimalDinoCharacter* dino
+    )
+    {
+        PublishTameEventInternal(
+            "dino_unclaimed",
+            dino,
+            nullptr
+        );
+    }
+
+
+    void PublishTameDeath(
+        APrimalDinoCharacter* dino,
+        float killing_damage
+    )
+    {
+        if (
+            !config.tame_events_enabled ||
+            !authenticated.load() ||
+            !dino
+        )
+        {
+            return;
+        }
+
+
+        /*
+         * APrimalDinoCharacter::Die also runs for wild dinos.
+         *
+         * TamerString is populated by ASA's tame path and lets
+         * this lifecycle event remain scoped to actual tames.
+         */
+        const std::string tamer =
+            dino
+                ->TamerStringField()
+                .ToStringUTF8();
+
+
+        if (
+            tamer.empty()
+        )
+        {
+            return;
+        }
+
+
+        SendJson({
+            {
+                "type",
+                "dino_died"
+            },
+            {
+                "schemaVersion",
+                1
+            },
+            {
+                "eventId",
+                GenerateCompanionGuid()
+            },
+            {
+                "dino",
+                BuildDinoTelemetry(
+                    dino
+                )
+            },
+            {
+                "killingDamage",
+                killing_damage
+            },
+            {
+                "server",
+                BuildServerIdentity()
+            }
+        });
+    }
+
+
     void Start()
     {
         if (
@@ -4590,6 +5590,8 @@ namespace Companion
 
         StartOutboundWorker();
 
+        StartServerMetricsWorker();
+
 
         websocket.start();
 
@@ -4670,6 +5672,8 @@ namespace Companion
             false
         );
 
+
+        StopServerMetricsWorker();
 
         StopOutboundWorker();
 
