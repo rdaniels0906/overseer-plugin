@@ -4051,11 +4051,55 @@ namespace
             );
 
 
-        const int tribe_id =
-            payload.value(
-                "tribeId",
-                0
-            );
+        int tribe_id =
+            0;
+
+
+        if (
+            payload.contains(
+                "tribeId"
+            ) &&
+            !payload[
+                "tribeId"
+            ].is_null()
+        )
+        {
+            const auto& value =
+                payload[
+                    "tribeId"
+                ];
+
+
+            if (
+                value.is_number_integer() ||
+                value.is_number_unsigned()
+            )
+            {
+                tribe_id =
+                    value.get<int>();
+            }
+            else if (
+                value.is_string()
+            )
+            {
+                const std::string text =
+                    value.get<std::string>();
+
+
+                try
+                {
+                    tribe_id =
+                        std::stoi(
+                            text
+                        );
+                }
+                catch (...)
+                {
+                    tribe_id =
+                        0;
+                }
+            }
+        }
 
 
         const std::string sender_name =
@@ -4064,26 +4108,6 @@ namespace
                 "Overseer"
             );
 
-
-        const std::string sender_steam_name =
-            payload.value(
-                "senderSteamName",
-                ""
-            );
-
-
-        const std::string sender_tribe_name =
-            payload.value(
-                "senderTribeName",
-                ""
-            );
-
-
-        const unsigned int sender_id =
-            payload.value(
-                "senderId",
-                0u
-            );
 
 
         if (
@@ -4148,22 +4172,9 @@ namespace
             );
         }
 
-
         FString native_sender_name =
             FString::FromStringUTF8(
                 sender_name
-            );
-
-
-        FString native_sender_steam_name =
-            FString::FromStringUTF8(
-                sender_steam_name
-            );
-
-
-        FString native_sender_tribe_name =
-            FString::FromStringUTF8(
-                sender_tribe_name
             );
 
 
@@ -4171,30 +4182,6 @@ namespace
             FString::FromStringUTF8(
                 message
             );
-
-
-        FString native_receiver;
-
-
-        FPrimalChatMessage chat_message;
-
-        chat_message.SenderName =
-            native_sender_name;
-
-        chat_message.SenderSteamName =
-            native_sender_steam_name;
-
-        chat_message.SenderTribeName =
-            native_sender_tribe_name;
-
-        chat_message.SenderId =
-            sender_id;
-
-        chat_message.Message =
-            native_message;
-
-        chat_message.Receiver =
-            native_receiver;
 
 
         int delivered =
@@ -4306,9 +4293,12 @@ namespace
             }
 
 
-            shooter
-                ->ClientChatMessage_Implementation(
-                    &chat_message
+            AsaApi::GetApiUtils()
+                .SendChatMessage(
+                    shooter,
+                    native_sender_name,
+                    L"{}",
+                    *native_message
                 );
 
 
