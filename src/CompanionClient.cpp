@@ -4293,13 +4293,62 @@ namespace
             }
 
 
-            AsaApi::GetApiUtils()
-                .SendChatMessage(
-                    shooter,
-                    native_sender_name,
-                    L"{}",
-                    *native_message
+            if (
+                audience ==
+                "TRIBE"
+            )
+            {
+                /*
+                 * AsaApi's generic SendChatMessage helper constructs an
+                 * FPrimalChatMessage using its default GLOBAL chat mode.
+                 *
+                 * Tribe recipients have already been filtered above using
+                 * the destination server's local tribe ID. Construct the
+                 * client message explicitly so ARK renders it as native
+                 * tribe chat instead of general chat.
+                 */
+                FPrimalChatMessage chat_message =
+                    FPrimalChatMessage();
+
+
+                chat_message.SenderName =
+                    native_sender_name;
+
+
+                chat_message.Message =
+                    native_message;
+
+
+                chat_message.SenderTeamIndex =
+                    tribe_id;
+
+
+                chat_message.SendMode =
+                    EChatSendMode::GlobalTribeChat;
+
+
+                chat_message.ChatType =
+                    EChatType::GlobalTribeChat;
+
+
+                chat_message.UserId =
+                    shooter->GetEOSId();
+
+
+                shooter->ClientChatMessage(
+                    chat_message
                 );
+            }
+            else
+            {
+                AsaApi::GetApiUtils()
+                    .SendChatMessage(
+                        shooter,
+                        native_sender_name,
+                        L"{}",
+                        *native_message
+                    );
+            }
 
 
             ++delivered;
